@@ -1,11 +1,14 @@
 import React, { useState } from "react";
-import { MapPin, Loader2, Navigation } from "lucide-react";
+import { MapPin, Loader2, Navigation, Clock } from "lucide-react";
+import { getLastLocation, getRecentCities, clearRecents } from "@/lib/storage";
 
-export default function LocationPrompt({ onCoords, onManualCity }) {
+export default function LocationPrompt({ onCoords, onManualCity, onSavedLocation }) {
   const [loading, setLoading] = useState(false);
   const [denied, setDenied] = useState(false);
   const [city, setCity] = useState("");
   const [err, setErr] = useState("");
+  const [last, setLast] = useState(() => getLastLocation());
+  const [recents, setRecents] = useState(() => getRecentCities());
 
   const askGeo = () => {
     if (!navigator.geolocation) {
@@ -39,6 +42,16 @@ export default function LocationPrompt({ onCoords, onManualCity }) {
     }
   };
 
+  const applySaved = (entry) => {
+    onSavedLocation({ lat: entry.lat, lng: entry.lng, city: entry.city });
+  };
+
+  const clearAll = () => {
+    clearRecents();
+    setLast(null);
+    setRecents([]);
+  };
+
   return (
     <div
       data-testid="location-prompt"
@@ -58,6 +71,33 @@ export default function LocationPrompt({ onCoords, onManualCity }) {
             Tell us how you feel. We pick three spots nearby. That's it.
           </p>
         </div>
+
+        {/* Continue as last — fastest path for returning users */}
+        {last && !denied && (
+          <div className="mb-5 vc-fade-up" style={{ animationDelay: "80ms" }}>
+            <button
+              data-testid="continue-last-btn"
+              onClick={() => applySaved(last)}
+              className="w-full flex items-center justify-between gap-3 bg-[#161616] border border-[#2a2622] hover:border-[#f5a623] rounded-2xl px-4 py-3 transition text-left"
+            >
+              <div className="flex items-center gap-3 min-w-0">
+                <Clock className="w-4 h-4 text-[#f5a623] shrink-0" />
+                <div className="min-w-0">
+                  <div className="text-[10px] uppercase tracking-[0.2em] text-[#9a9385]">
+                    Continue from last time
+                  </div>
+                  <div
+                    data-testid="last-city-name"
+                    className="font-display font-bold text-lg text-[#f5f1e8] truncate"
+                  >
+                    {last.city || "Nearby"}
+                  </div>
+                </div>
+              </div>
+              <span className="text-[#f5a623] font-bold text-lg shrink-0">→</span>
+            </button>
+          </div>
+        )}
 
         {!denied ? (
           <div className="space-y-4">
@@ -130,6 +170,41 @@ export default function LocationPrompt({ onCoords, onManualCity }) {
               Or use my location
             </button>
           </form>
+        )}
+
+        {/* Recent cities chips */}
+        {recents.length > 0 && (
+          <div
+            data-testid="recent-cities"
+            className="mt-10 vc-fade-up"
+            style={{ animationDelay: "160ms" }}
+          >
+            <div className="flex items-center justify-between mb-3">
+              <div className="text-[10px] uppercase tracking-[0.22em] text-[#9a9385]">
+                Recent
+              </div>
+              <button
+                data-testid="clear-recents"
+                onClick={clearAll}
+                className="text-[10px] uppercase tracking-[0.18em] text-[#595247] hover:text-[#f57ca4]"
+              >
+                Clear
+              </button>
+            </div>
+            <div className="flex flex-wrap gap-2">
+              {recents.map((r) => (
+                <button
+                  key={r.city + r.ts}
+                  data-testid={`recent-${r.city.toLowerCase().replace(/\s+/g, "-")}`}
+                  onClick={() => applySaved(r)}
+                  className="inline-flex items-center gap-1.5 bg-[#161616] border border-[#2a2622] hover:border-[#f5a623] rounded-full px-3 py-1.5 text-sm text-[#f5f1e8] transition"
+                >
+                  <MapPin className="w-3 h-3 text-[#f5a623]" />
+                  <span className="truncate max-w-[180px]">{r.city}</span>
+                </button>
+              ))}
+            </div>
+          </div>
         )}
       </div>
     </div>

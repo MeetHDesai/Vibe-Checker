@@ -5,6 +5,7 @@ import SituationPicker from "@/components/SituationPicker";
 import LoadingState from "@/components/LoadingState";
 import Results from "@/components/Results";
 import RateLimitedScreen from "@/components/RateLimitedScreen";
+import { saveLastLocation, pushRecentCity } from "@/lib/storage";
 import { toast } from "sonner";
 
 const API = `${process.env.REACT_APP_BACKEND_URL}/api`;
@@ -21,18 +22,39 @@ export default function VibeCheck() {
   const handleCoords = useCallback(({ lat, lng }) => {
     setCoords({ lat, lng });
     setCity(null);
+    saveLastLocation({ lat, lng, city: null, source: "geo" });
     setStage("picker");
   }, []);
 
   const handleCity = useCallback(async (cityStr) => {
     try {
       const { data } = await axios.post(`${API}/geocode`, { city: cityStr });
+      const resolvedCity = data.formatted_address || cityStr;
       setCoords({ lat: data.lat, lng: data.lng });
-      setCity(data.formatted_address || cityStr);
+      setCity(resolvedCity);
+      saveLastLocation({
+        lat: data.lat,
+        lng: data.lng,
+        city: resolvedCity,
+        source: "manual",
+      });
+      pushRecentCity({ lat: data.lat, lng: data.lng, city: resolvedCity });
       setStage("picker");
     } catch (e) {
       toast.error("Couldn't find that city");
     }
+  }, []);
+
+  const handleSavedLocation = useCallback(({ lat, lng, city: savedCity }) => {
+    setCoords({ lat, lng });
+    setCity(savedCity || null);
+    saveLastLocation({
+      lat,
+      lng,
+      city: savedCity || null,
+      source: savedCity ? "manual" : "geo",
+    });
+    setStage("picker");
   }, []);
 
   const handlePickSituation = useCallback(
@@ -48,7 +70,17 @@ export default function VibeCheck() {
           city: city,
         });
         setPicks(data.picks || []);
-        if (data.city && !city) setCity(data.city);
+        if (data.city && !city) {
+          setCity(data.city);
+          // Also persist the reverse-geocoded city as recent
+          pushRecentCity({ lat: coords.lat, lng: coords.lng, city: data.city });
+          saveLastLocation({
+            lat: coords.lat,
+            lng: coords.lng,
+            city: data.city,
+            source: "geo",
+          });
+        }
         if (!data.picks || data.picks.length === 0) {
           setErrMsg("No vibe-worthy spots nearby. Try another situation.");
           setStage("error");
@@ -76,7 +108,13 @@ export default function VibeCheck() {
   );
 
   if (stage === "location") {
-    return <LocationPrompt onCoords={handleCoords} onManualCity={handleCity} />;
+    return (
+      <LocationPrompt
+        onCoords={handleCoords}
+        onManualCity={handleCity}
+        onSavedLocation={handleSavedLocation}
+      />
+    );
   }
   if (stage === "picker") {
     return (
