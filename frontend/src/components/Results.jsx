@@ -1,12 +1,7 @@
-import React from "react";
+import React, { useState } from "react";
 import { MapPin, Share2, ChevronLeft, RefreshCcw } from "lucide-react";
-import { toast } from "sonner";
 import PickCard from "@/components/PickCard";
-
-function fmtDistance(m) {
-  if (m < 1000) return `${m} m`;
-  return `${(m / 1000).toFixed(1)} km`;
-}
+import ShareModal from "@/components/ShareModal";
 
 export default function Results({
   picks,
@@ -18,30 +13,7 @@ export default function Results({
   onReroll,
   rerollingIdx,
 }) {
-  const share = async () => {
-    const text = picks
-      .map(
-        (p, i) =>
-          `${i + 1}. ${p.name} — ${p.rating}★ · ${fmtDistance(p.distance_m)}\n"${p.vibe}"\n${p.maps_url}`
-      )
-      .join("\n\n");
-    const payload = {
-      title: `Vibe Check — ${situation.title}`,
-      text: `My 3 picks for "${situation.title}"${city ? ` in ${city}` : ""}:\n\n${text}\n\nvia Vibe Check`,
-    };
-    try {
-      if (navigator.share) {
-        await navigator.share(payload);
-      } else {
-        await navigator.clipboard.writeText(payload.text);
-        toast.success("Copied to clipboard");
-      }
-    } catch (e) {
-      if (e?.name !== "AbortError") {
-        toast.error("Couldn't share");
-      }
-    }
-  };
+  const [shareOpen, setShareOpen] = useState(false);
 
   return (
     <div data-testid="results-screen" className="min-h-[100dvh] px-5 sm:px-8 pt-6 pb-20 max-w-2xl mx-auto">
@@ -55,7 +27,7 @@ export default function Results({
         </button>
         <button
           data-testid="share-btn"
-          onClick={share}
+          onClick={() => setShareOpen(true)}
           className="inline-flex items-center gap-2 bg-[#161616] border border-[#2a2622] hover:border-[#f5a623] text-[#f5f1e8] text-sm rounded-full px-4 py-2 transition"
         >
           <Share2 className="w-4 h-4" />
@@ -105,6 +77,14 @@ export default function Results({
           Different vibe
         </button>
       </div>
+
+      <ShareModal
+        open={shareOpen}
+        onClose={() => setShareOpen(false)}
+        picks={picks}
+        situation={situation}
+        city={city}
+      />
     </div>
   );
 }

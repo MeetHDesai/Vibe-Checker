@@ -13,6 +13,7 @@ import {
   MessageSquare,
   Shuffle,
 } from "lucide-react";
+import { fullPhotoUrl } from "@/lib/photo";
 
 const API = `${process.env.REACT_APP_BACKEND_URL}/api`;
 
@@ -86,7 +87,7 @@ export default function PickCard({ pick, index, origin, onReroll, rerolling }) {
         <div className="relative w-28 sm:w-40 shrink-0 bg-[#111]">
           {pick.photo_url ? (
             <img
-              src={pick.photo_url}
+              src={fullPhotoUrl(pick.photo_url)}
               alt={pick.name}
               className="absolute inset-0 w-full h-full object-cover"
               loading="lazy"

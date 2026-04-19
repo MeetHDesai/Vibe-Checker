@@ -1,5 +1,5 @@
 from fastapi import FastAPI, APIRouter, HTTPException, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from dotenv import load_dotenv
 from starlette.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
@@ -259,9 +259,35 @@ async def reverse_geocode_city(lat: float, lng: float) -> Optional[str]:
 
 
 def build_photo_url(photo_reference: str) -> str:
-    return (
-        f"https://maps.googleapis.com/maps/api/place/photo?maxwidth=800"
-        f"&photo_reference={photo_reference}&key={GOOGLE_MAPS_API_KEY}"
+    # Return backend-proxied URL (hides API key, ensures CORS-friendly image)
+    return f"/api/place_photo?ref={photo_reference}&maxwidth=800"
+
+
+@api_router.get("/place_photo")
+async def place_photo(ref: str, maxwidth: int = 800):
+    """Proxy for Google Place Photos — keeps API key server-side and delivers
+    images with our own CORS headers so canvas-based tools (html-to-image) work."""
+    upstream = "https://maps.googleapis.com/maps/api/place/photo"
+    params = {"photo_reference": ref, "maxwidth": maxwidth, "key": GOOGLE_MAPS_API_KEY}
+    try:
+        client_h = httpx.AsyncClient(timeout=20.0, follow_redirects=True)
+        r = await client_h.get(upstream, params=params)
+        if r.status_code != 200:
+            await client_h.aclose()
+            raise HTTPException(status_code=502, detail="Photo fetch failed")
+        content_type = r.headers.get("content-type", "image/jpeg")
+        body = r.content
+        await client_h.aclose()
+    except httpx.HTTPError:
+        raise HTTPException(status_code=502, detail="Photo fetch failed")
+
+    return StreamingResponse(
+        iter([body]),
+        media_type=content_type,
+        headers={
+            "Cache-Control": "public, max-age=86400, immutable",
+            "Access-Control-Allow-Origin": "*",
+        },
     )
 
 
