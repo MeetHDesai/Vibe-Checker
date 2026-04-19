@@ -4,6 +4,7 @@ import LocationPrompt from "@/components/LocationPrompt";
 import SituationPicker from "@/components/SituationPicker";
 import LoadingState from "@/components/LoadingState";
 import Results from "@/components/Results";
+import RateLimitedScreen from "@/components/RateLimitedScreen";
 import { toast } from "sonner";
 
 const API = `${process.env.REACT_APP_BACKEND_URL}/api`;
@@ -15,6 +16,7 @@ export default function VibeCheck() {
   const [situation, setSituation] = useState(null);
   const [picks, setPicks] = useState([]);
   const [errMsg, setErrMsg] = useState("");
+  const [retryAfter, setRetryAfter] = useState(0);
 
   const handleCoords = useCallback(({ lat, lng }) => {
     setCoords({ lat, lng });
@@ -54,9 +56,20 @@ export default function VibeCheck() {
           setStage("results");
         }
       } catch (e) {
-        const detail = e?.response?.data?.detail || "Something went sideways.";
-        setErrMsg(detail);
-        setStage("error");
+        const status = e?.response?.status;
+        const detail = e?.response?.data?.detail;
+        if (status === 429 && detail && typeof detail === "object") {
+          setErrMsg(detail.message || "Too many requests. Try again shortly.");
+          setRetryAfter(detail.retry_after || 30);
+          setStage("rate_limited");
+        } else {
+          const msg =
+            (typeof detail === "string" && detail) ||
+            detail?.message ||
+            "Something went sideways.";
+          setErrMsg(msg);
+          setStage("error");
+        }
       }
     },
     [coords, city]
@@ -85,6 +98,15 @@ export default function VibeCheck() {
         city={city}
         onBack={() => setStage("picker")}
         onNew={() => setStage("picker")}
+      />
+    );
+  }
+  if (stage === "rate_limited") {
+    return (
+      <RateLimitedScreen
+        message={errMsg}
+        retryAfter={retryAfter}
+        onDone={() => setStage("picker")}
       />
     );
   }

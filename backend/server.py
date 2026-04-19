@@ -1,16 +1,19 @@
-from fastapi import FastAPI, APIRouter, HTTPException
+from fastapi import FastAPI, APIRouter, HTTPException, Request
+from fastapi.responses import JSONResponse
 from dotenv import load_dotenv
 from starlette.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
 import os
 import math
 import json
+import time
 import logging
 import asyncio
 import httpx
+from collections import deque
 from pathlib import Path
 from pydantic import BaseModel, Field
-from typing import List, Optional
+from typing import List, Optional, Deque, Dict
 
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / '.env')
@@ -25,6 +28,41 @@ EMERGENT_LLM_KEY = os.environ['EMERGENT_LLM_KEY']
 
 app = FastAPI(title="Vibe Check API")
 api_router = APIRouter(prefix="/api")
+
+# --------- Rate limiter (in-memory sliding window, per IP) ---------
+RECOMMEND_LIMIT = 5          # max requests
+RECOMMEND_WINDOW_SEC = 60    # per window
+_rate_buckets: Dict[str, Deque[float]] = {}
+
+
+def _client_ip(request: Request) -> str:
+    xff = request.headers.get("x-forwarded-for")
+    if xff:
+        return xff.split(",")[0].strip()
+    return request.client.host if request.client else "unknown"
+
+
+def rate_limit_recommend(request: Request):
+    """Raises 429 if this IP has exceeded RECOMMEND_LIMIT requests in the last window."""
+    ip = _client_ip(request)
+    now = time.time()
+    bucket = _rate_buckets.setdefault(ip, deque())
+    # drop expired
+    while bucket and now - bucket[0] > RECOMMEND_WINDOW_SEC:
+        bucket.popleft()
+    if len(bucket) >= RECOMMEND_LIMIT:
+        retry_after = int(RECOMMEND_WINDOW_SEC - (now - bucket[0])) + 1
+        raise HTTPException(
+            status_code=429,
+            detail={
+                "message": "Whoa, slow down. Take a breath, pick a vibe, and try again in a sec.",
+                "retry_after": max(retry_after, 1),
+                "limit": RECOMMEND_LIMIT,
+                "window_sec": RECOMMEND_WINDOW_SEC,
+            },
+            headers={"Retry-After": str(max(retry_after, 1))},
+        )
+    bucket.append(now)
 
 # --------- Situation config ---------
 # Each situation maps to Google Places query params + a vibe hint for Claude
@@ -250,7 +288,8 @@ async def geocode(req: GeocodeRequest):
 
 
 @api_router.post("/recommend", response_model=RecommendResponse)
-async def recommend(req: RecommendRequest):
+async def recommend(req: RecommendRequest, request: Request):
+    rate_limit_recommend(request)
     cfg = SITUATIONS.get(req.situation)
     if not cfg:
         raise HTTPException(status_code=400, detail="Unknown situation")
