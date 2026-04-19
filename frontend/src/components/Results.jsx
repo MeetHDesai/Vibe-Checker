@@ -8,7 +8,16 @@ function fmtDistance(m) {
   return `${(m / 1000).toFixed(1)} km`;
 }
 
-export default function Results({ picks, situation, city, origin, onBack, onNew }) {
+export default function Results({
+  picks,
+  situation,
+  city,
+  origin,
+  onBack,
+  onNew,
+  onReroll,
+  rerollingIdx,
+}) {
   const share = async () => {
     const text = picks
       .map(
@@ -75,7 +84,14 @@ export default function Results({ picks, situation, city, origin, onBack, onNew 
 
       <div className="space-y-4">
         {picks.map((p, idx) => (
-          <PickCard key={p.place_id} pick={p} index={idx} origin={origin} />
+          <PickCard
+            key={p.place_id}
+            pick={p}
+            index={idx}
+            origin={origin}
+            onReroll={onReroll}
+            rerolling={rerollingIdx === idx}
+          />
         ))}
       </div>
 

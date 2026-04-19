@@ -11,6 +11,7 @@ import {
   Footprints,
   Loader2,
   MessageSquare,
+  Shuffle,
 } from "lucide-react";
 
 const API = `${process.env.REACT_APP_BACKEND_URL}/api`;
@@ -31,7 +32,7 @@ function todayKey() {
   return [6, 0, 1, 2, 3, 4, 5][d]; // map to M..S index
 }
 
-export default function PickCard({ pick, index, origin }) {
+export default function PickCard({ pick, index, origin, onReroll, rerolling }) {
   const [open, setOpen] = useState(false);
   const [details, setDetails] = useState(null);
   const [loading, setLoading] = useState(false);
@@ -70,6 +71,17 @@ export default function PickCard({ pick, index, origin }) {
       style={{ animationDelay: `${140 + index * 110}ms` }}
       className="vc-fade-up relative bg-[#1a1a1a] border border-[#2a2622] rounded-2xl overflow-hidden hover:border-[#f5a623]/60 transition"
     >
+      {rerolling && (
+        <div
+          data-testid={`pick-rerolling-${index}`}
+          className="absolute inset-0 z-10 bg-[#0f0f0f]/80 backdrop-blur-sm flex flex-col items-center justify-center gap-2"
+        >
+          <Loader2 className="w-6 h-6 text-[#f5a623] vc-spin" />
+          <div className="text-[11px] uppercase tracking-[0.25em] text-[#9a9385]">
+            Finding a better one…
+          </div>
+        </div>
+      )}
       <div className="flex">
         <div className="relative w-28 sm:w-40 shrink-0 bg-[#111]">
           {pick.photo_url ? (
@@ -139,18 +151,33 @@ export default function PickCard({ pick, index, origin }) {
         </div>
       </div>
 
-      {/* Expand trigger */}
-      <button
-        data-testid={`pick-expand-${index}`}
-        onClick={toggle}
-        aria-expanded={open}
-        className="w-full border-t border-[#2a2622] px-4 sm:px-5 py-2.5 flex items-center justify-between text-xs uppercase tracking-[0.18em] text-[#9a9385] hover:text-[#f5a623] hover:bg-[#161616] transition"
-      >
-        <span>{open ? "Hide details" : "Why this pick?"}</span>
-        <ChevronDown
-          className={`w-4 h-4 transition-transform ${open ? "rotate-180" : ""}`}
-        />
-      </button>
+      {/* Expand trigger + re-roll */}
+      <div className="border-t border-[#2a2622] flex">
+        <button
+          data-testid={`pick-expand-${index}`}
+          onClick={toggle}
+          aria-expanded={open}
+          className="flex-1 px-4 sm:px-5 py-2.5 flex items-center justify-between text-xs uppercase tracking-[0.18em] text-[#9a9385] hover:text-[#f5a623] hover:bg-[#161616] transition"
+        >
+          <span>{open ? "Hide details" : "Why this pick?"}</span>
+          <ChevronDown
+            className={`w-4 h-4 transition-transform ${open ? "rotate-180" : ""}`}
+          />
+        </button>
+        <button
+          data-testid={`pick-reroll-${index}`}
+          onClick={() => onReroll?.(pick.place_id, index)}
+          disabled={rerolling}
+          title="Not feeling this one"
+          aria-label="Swap this pick"
+          className="border-l border-[#2a2622] px-4 text-[#9a9385] hover:text-[#f5a623] hover:bg-[#161616] transition disabled:opacity-40 disabled:cursor-not-allowed flex items-center gap-1.5"
+        >
+          <Shuffle className="w-4 h-4" />
+          <span className="text-xs uppercase tracking-[0.18em] hidden sm:inline">
+            Swap
+          </span>
+        </button>
+      </div>
 
       {/* Expanded panel */}
       {open && (

@@ -18,6 +18,7 @@ export default function VibeCheck() {
   const [picks, setPicks] = useState([]);
   const [errMsg, setErrMsg] = useState("");
   const [retryAfter, setRetryAfter] = useState(0);
+  const [rerollingIdx, setRerollingIdx] = useState(-1);
 
   const handleCoords = useCallback(({ lat, lng }) => {
     setCoords({ lat, lng });
@@ -107,6 +108,41 @@ export default function VibeCheck() {
     [coords, city]
   );
 
+  const handleReroll = useCallback(
+    async (placeId, idx) => {
+      if (rerollingIdx !== -1) return;
+      setRerollingIdx(idx);
+      try {
+        const exclude = picks.map((p) => p.place_id);
+        const { data } = await axios.post(`${API}/reroll`, {
+          lat: coords.lat,
+          lng: coords.lng,
+          situation: situation.id,
+          city: city,
+          exclude,
+        });
+        if (data?.pick) {
+          setPicks((prev) => prev.map((p, i) => (i === idx ? data.pick : p)));
+        }
+      } catch (e) {
+        const status = e?.response?.status;
+        const detail = e?.response?.data?.detail;
+        if (status === 429 && detail && typeof detail === "object") {
+          toast.error(detail.message || "Too many tries — slow down.");
+        } else if (status === 404) {
+          toast.error(
+            typeof detail === "string" ? detail : "No more options nearby."
+          );
+        } else {
+          toast.error("Couldn't swap that one. Try again.");
+        }
+      } finally {
+        setRerollingIdx(-1);
+      }
+    },
+    [coords, city, situation, picks, rerollingIdx]
+  );
+
   if (stage === "location") {
     return (
       <LocationPrompt
@@ -137,6 +173,8 @@ export default function VibeCheck() {
         origin={coords}
         onBack={() => setStage("picker")}
         onNew={() => setStage("picker")}
+        onReroll={handleReroll}
+        rerollingIdx={rerollingIdx}
       />
     );
   }

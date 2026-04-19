@@ -64,6 +64,30 @@ def rate_limit_recommend(request: Request):
         )
     bucket.append(now)
 
+
+# --------- Nearby-search cache (for reroll) ---------
+NEARBY_CACHE_TTL_SEC = 300  # 5 min
+_nearby_cache: Dict[str, tuple] = {}  # key -> (ts, scored_list)
+
+
+def _cache_key(lat: float, lng: float, situation: str) -> str:
+    # ~100m precision — same geo+situation reuses cache
+    return f"{round(lat, 3)}|{round(lng, 3)}|{situation}"
+
+
+def _cache_put(lat: float, lng: float, situation: str, scored: list) -> None:
+    _nearby_cache[_cache_key(lat, lng, situation)] = (time.time(), scored)
+
+
+def _cache_get(lat: float, lng: float, situation: str) -> Optional[list]:
+    entry = _nearby_cache.get(_cache_key(lat, lng, situation))
+    if not entry:
+        return None
+    ts, scored = entry
+    if time.time() - ts > NEARBY_CACHE_TTL_SEC:
+        return None
+    return scored
+
 # --------- Situation config ---------
 # Each situation maps to Google Places query params + a vibe hint for Claude
 SITUATIONS = {
@@ -387,16 +411,8 @@ async def place_details(req: PlaceDetailsRequest):
     )
 
 
-@api_router.post("/recommend", response_model=RecommendResponse)
-async def recommend(req: RecommendRequest, request: Request):
-    rate_limit_recommend(request)
-    cfg = SITUATIONS.get(req.situation)
-    if not cfg:
-        raise HTTPException(status_code=400, detail="Unknown situation")
-
-    results = await google_nearby_search(req.lat, req.lng, cfg)
-
-    # Filter and score
+def _score_results(results: list, origin_lat: float, origin_lng: float, cfg: dict) -> list:
+    """Apply filters (rating, distance) and compute score. Returns sorted [(score, dist, place), ...]."""
     scored = []
     for p in results:
         rating = p.get("rating")
@@ -405,38 +421,73 @@ async def recommend(req: RecommendRequest, request: Request):
         loc = p.get("geometry", {}).get("location") or {}
         if "lat" not in loc or "lng" not in loc:
             continue
-        dist = haversine_m(req.lat, req.lng, loc["lat"], loc["lng"])
+        dist = haversine_m(origin_lat, origin_lng, loc["lat"], loc["lng"])
         if dist > 1500:
             continue
-        # rating × (1/distance). Use dist+50 to avoid div by tiny numbers
         score = rating * (1.0 / max(dist + 50, 50))
         scored.append((score, dist, p))
-
+    # Also add relaxed tail (below min_rating but still within radius) so reroll can dig deeper
+    seen_ids = {p[2].get("place_id") for p in scored}
+    relaxed: list = []
+    for p in results:
+        pid = p.get("place_id")
+        if pid in seen_ids:
+            continue
+        loc = p.get("geometry", {}).get("location") or {}
+        if "lat" not in loc or "lng" not in loc:
+            continue
+        dist = haversine_m(origin_lat, origin_lng, loc["lat"], loc["lng"])
+        if dist > 1500:
+            continue
+        rating = p.get("rating") or 3.5
+        score = rating * (1.0 / max(dist + 50, 50))
+        relaxed.append((score, dist, p))
     scored.sort(key=lambda x: x[0], reverse=True)
-    top = scored[:3]
+    relaxed.sort(key=lambda x: x[0], reverse=True)
+    return scored + relaxed
 
-    # If too few results, relax (drop min_rating a bit) to still return something
-    if len(top) < 3:
-        relaxed = []
-        for p in results:
-            rating = p.get("rating") or 0
-            loc = p.get("geometry", {}).get("location") or {}
-            if "lat" not in loc or "lng" not in loc:
-                continue
-            dist = haversine_m(req.lat, req.lng, loc["lat"], loc["lng"])
-            if dist > 1500:
-                continue
-            score = (rating or 3.5) * (1.0 / max(dist + 50, 50))
-            relaxed.append((score, dist, p))
-        relaxed.sort(key=lambda x: x[0], reverse=True)
-        # Merge, dedupe by place_id
-        seen = {p[2].get("place_id") for p in top}
-        for item in relaxed:
-            if len(top) >= 3:
-                break
-            if item[2].get("place_id") not in seen:
-                top.append(item)
-                seen.add(item[2].get("place_id"))
+
+def _build_place_result(scored_item: tuple, vibe: str, cfg: dict) -> "PlaceResult":
+    _score, dist, p = scored_item
+    loc = p["geometry"]["location"]
+    photos = p.get("photos") or []
+    photo_ref = photos[0].get("photo_reference") if photos else None
+    return PlaceResult(
+        place_id=p.get("place_id", ""),
+        name=p.get("name", "Unknown"),
+        rating=float(p.get("rating") or 0),
+        user_ratings_total=int(p.get("user_ratings_total") or 0),
+        distance_m=dist,
+        open_now=bool((p.get("opening_hours") or {}).get("open_now", cfg.get("require_open_now", False))),
+        address=p.get("vicinity") or p.get("formatted_address") or "",
+        price_level=p.get("price_level"),
+        maps_url=f"https://www.google.com/maps/search/?api=1&query={loc['lat']},{loc['lng']}&query_place_id={p.get('place_id', '')}",
+        vibe=vibe,
+        photo_url=build_photo_url(photo_ref) if photo_ref else None,
+        lat=loc["lat"],
+        lng=loc["lng"],
+    )
+
+
+async def _get_or_fetch_scored(lat: float, lng: float, situation: str, cfg: dict) -> list:
+    cached = _cache_get(lat, lng, situation)
+    if cached is not None:
+        return cached
+    results = await google_nearby_search(lat, lng, cfg)
+    scored = _score_results(results, lat, lng, cfg)
+    _cache_put(lat, lng, situation, scored)
+    return scored
+
+
+@api_router.post("/recommend", response_model=RecommendResponse)
+async def recommend(req: RecommendRequest, request: Request):
+    rate_limit_recommend(request)
+    cfg = SITUATIONS.get(req.situation)
+    if not cfg:
+        raise HTTPException(status_code=400, detail="Unknown situation")
+
+    scored = await _get_or_fetch_scored(req.lat, req.lng, req.situation, cfg)
+    top = scored[:3]
 
     if not top:
         raise HTTPException(
@@ -450,44 +501,68 @@ async def recommend(req: RecommendRequest, request: Request):
         city = await reverse_geocode_city(req.lat, req.lng)
 
     # Build simple dicts for LLM
-    simple = []
-    for _, dist, p in top:
-        simple.append(
-            {
-                "name": p.get("name"),
-                "rating": p.get("rating"),
-                "type_label": cfg["label"].lower(),
-            }
-        )
-
+    simple = [
+        {"name": p.get("name"), "rating": p.get("rating"), "type_label": cfg["label"].lower()}
+        for _, _, p in top
+    ]
     vibes = await generate_vibes(simple, city, cfg["vibe_hint"])
 
-    picks: List[PlaceResult] = []
-    for (score, dist, p), vibe in zip(top, vibes):
-        loc = p["geometry"]["location"]
-        photo_ref = None
-        photos = p.get("photos") or []
-        if photos:
-            photo_ref = photos[0].get("photo_reference")
-        picks.append(
-            PlaceResult(
-                place_id=p.get("place_id", ""),
-                name=p.get("name", "Unknown"),
-                rating=float(p.get("rating") or 0),
-                user_ratings_total=int(p.get("user_ratings_total") or 0),
-                distance_m=dist,
-                open_now=bool((p.get("opening_hours") or {}).get("open_now", cfg.get("require_open_now", False))),
-                address=p.get("vicinity") or p.get("formatted_address") or "",
-                price_level=p.get("price_level"),
-                maps_url=f"https://www.google.com/maps/search/?api=1&query={loc['lat']},{loc['lng']}&query_place_id={p.get('place_id', '')}",
-                vibe=vibe,
-                photo_url=build_photo_url(photo_ref) if photo_ref else None,
-                lat=loc["lat"],
-                lng=loc["lng"],
-            )
+    picks: List[PlaceResult] = [
+        _build_place_result(item, vibe, cfg) for item, vibe in zip(top, vibes)
+    ]
+    return RecommendResponse(situation=req.situation, city=city, picks=picks)
+
+
+class RerollRequest(BaseModel):
+    lat: float
+    lng: float
+    situation: str
+    city: Optional[str] = None
+    exclude: List[str] = Field(default_factory=list)
+
+
+class RerollResponse(BaseModel):
+    situation: str
+    pick: PlaceResult
+
+
+@api_router.post("/reroll", response_model=RerollResponse)
+async def reroll(req: RerollRequest, request: Request):
+    rate_limit_recommend(request)
+    cfg = SITUATIONS.get(req.situation)
+    if not cfg:
+        raise HTTPException(status_code=400, detail="Unknown situation")
+
+    scored = await _get_or_fetch_scored(req.lat, req.lng, req.situation, cfg)
+    exclude = set(req.exclude or [])
+    # find the best remaining pick not in exclude
+    next_item = None
+    for item in scored:
+        pid = item[2].get("place_id")
+        if pid and pid not in exclude:
+            next_item = item
+            break
+
+    if next_item is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Out of fresh options. Try a different vibe or move around.",
         )
 
-    return RecommendResponse(situation=req.situation, city=city, picks=picks)
+    city = req.city
+    if not city:
+        city = await reverse_geocode_city(req.lat, req.lng)
+
+    simple = [
+        {
+            "name": next_item[2].get("name"),
+            "rating": next_item[2].get("rating"),
+            "type_label": cfg["label"].lower(),
+        }
+    ]
+    vibes = await generate_vibes(simple, city, cfg["vibe_hint"])
+    pick = _build_place_result(next_item, vibes[0], cfg)
+    return RerollResponse(situation=req.situation, pick=pick)
 
 
 app.include_router(api_router)
