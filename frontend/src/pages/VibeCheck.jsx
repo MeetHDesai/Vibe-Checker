@@ -134,6 +134,7 @@ export default function VibeCheck() {
         picks={picks}
         situation={situation}
         city={city}
+        origin={coords}
         onBack={() => setStage("picker")}
         onNew={() => setStage("picker")}
       />

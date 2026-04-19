@@ -158,6 +158,31 @@ class GeocodeResponse(BaseModel):
     formatted_address: str
 
 
+class PlaceDetailsRequest(BaseModel):
+    place_id: str
+    origin_lat: Optional[float] = None
+    origin_lng: Optional[float] = None
+
+
+class PlaceReview(BaseModel):
+    author: str
+    rating: int
+    text: str
+    relative_time: Optional[str] = None
+
+
+class PlaceDetailsResponse(BaseModel):
+    place_id: str
+    name: str
+    phone: Optional[str] = None
+    website: Optional[str] = None
+    weekday_text: List[str] = []
+    open_now: Optional[bool] = None
+    top_review: Optional[PlaceReview] = None
+    walking_minutes: Optional[int] = None
+    summary: Optional[str] = None
+
+
 # --------- Utilities ---------
 def haversine_m(lat1, lng1, lat2, lng2):
     r = 6371000.0
@@ -285,6 +310,81 @@ async def geocode(req: GeocodeRequest):
     res = data["results"][0]
     loc = res["geometry"]["location"]
     return GeocodeResponse(lat=loc["lat"], lng=loc["lng"], formatted_address=res["formatted_address"])
+
+
+@api_router.post("/place_details", response_model=PlaceDetailsResponse)
+async def place_details(req: PlaceDetailsRequest):
+    url = "https://maps.googleapis.com/maps/api/place/details/json"
+    fields = [
+        "name",
+        "formatted_phone_number",
+        "international_phone_number",
+        "website",
+        "current_opening_hours",
+        "opening_hours",
+        "reviews",
+        "geometry",
+        "editorial_summary",
+    ]
+    params = {
+        "place_id": req.place_id,
+        "fields": ",".join(fields),
+        "reviews_sort": "most_relevant",
+        "key": GOOGLE_MAPS_API_KEY,
+    }
+    async with httpx.AsyncClient(timeout=12.0) as hc:
+        r = await hc.get(url, params=params)
+        data = r.json()
+
+    if data.get("status") != "OK":
+        raise HTTPException(
+            status_code=502,
+            detail=f"Place details error: {data.get('status')} {data.get('error_message', '')}",
+        )
+
+    d = data.get("result", {}) or {}
+    hours = d.get("current_opening_hours") or d.get("opening_hours") or {}
+    weekday_text = hours.get("weekday_text") or []
+    open_now = hours.get("open_now")
+    reviews = d.get("reviews") or []
+    top_rev: Optional[PlaceReview] = None
+    if reviews:
+        best = sorted(
+            reviews,
+            key=lambda r: (r.get("rating", 0), len(r.get("text", "") or "")),
+            reverse=True,
+        )[0]
+        text = (best.get("text") or "").strip()
+        # Cap review length to keep UI tidy
+        if len(text) > 320:
+            text = text[:317].rstrip() + "…"
+        top_rev = PlaceReview(
+            author=best.get("author_name") or "Anonymous",
+            rating=int(best.get("rating") or 0),
+            text=text,
+            relative_time=best.get("relative_time_description"),
+        )
+
+    # Walking minutes: haversine × 1.25 detour factor, 80 m/min walking pace
+    walking_minutes: Optional[int] = None
+    loc = (d.get("geometry") or {}).get("location")
+    if loc and req.origin_lat is not None and req.origin_lng is not None:
+        straight_m = haversine_m(req.origin_lat, req.origin_lng, loc["lat"], loc["lng"])
+        walking_minutes = max(1, int(round((straight_m * 1.25) / 80)))
+
+    summary = (d.get("editorial_summary") or {}).get("overview")
+
+    return PlaceDetailsResponse(
+        place_id=req.place_id,
+        name=d.get("name") or "Unknown",
+        phone=d.get("formatted_phone_number") or d.get("international_phone_number"),
+        website=d.get("website"),
+        weekday_text=weekday_text,
+        open_now=open_now,
+        top_review=top_rev,
+        walking_minutes=walking_minutes,
+        summary=summary,
+    )
 
 
 @api_router.post("/recommend", response_model=RecommendResponse)
