@@ -20,8 +20,8 @@ load_dotenv(ROOT_DIR / '.env')
 
 # MongoDB connection (kept for template consistency, unused by this app)
 mongo_url = os.environ['MONGO_URL']
-client = AsyncIOMotorClient(mongo_url)
-db = client[os.environ['DB_NAME']]
+mongo_client = AsyncIOMotorClient(mongo_url)
+db = mongo_client[os.environ['DB_NAME']]
 
 GOOGLE_MAPS_API_KEY = os.environ['GOOGLE_MAPS_API_KEY']
 EMERGENT_LLM_KEY = os.environ['EMERGENT_LLM_KEY']
@@ -30,8 +30,8 @@ app = FastAPI(title="Vibe Check API")
 api_router = APIRouter(prefix="/api")
 
 # --------- Rate limiter (in-memory sliding window, per IP) ---------
-RECOMMEND_LIMIT = 5          # max requests
-RECOMMEND_WINDOW_SEC = 60    # per window
+RECOMMEND_LIMIT = 5
+RECOMMEND_WINDOW_SEC = 60
 _rate_buckets: Dict[str, Deque[float]] = {}
 
 
@@ -43,11 +43,9 @@ def _client_ip(request: Request) -> str:
 
 
 def rate_limit_recommend(request: Request):
-    """Raises 429 if this IP has exceeded RECOMMEND_LIMIT requests in the last window."""
     ip = _client_ip(request)
     now = time.time()
     bucket = _rate_buckets.setdefault(ip, deque())
-    # drop expired
     while bucket and now - bucket[0] > RECOMMEND_WINDOW_SEC:
         bucket.popleft()
     if len(bucket) >= RECOMMEND_LIMIT:
@@ -66,12 +64,11 @@ def rate_limit_recommend(request: Request):
 
 
 # --------- Nearby-search cache (for reroll) ---------
-NEARBY_CACHE_TTL_SEC = 300  # 5 min
-_nearby_cache: Dict[str, tuple] = {}  # key -> (ts, scored_list)
+NEARBY_CACHE_TTL_SEC = 300
+_nearby_cache: Dict[str, tuple] = {}
 
 
 def _cache_key(lat: float, lng: float, situation: str) -> str:
-    # ~100m precision — same geo+situation reuses cache
     return f"{round(lat, 3)}|{round(lng, 3)}|{situation}"
 
 
@@ -88,8 +85,8 @@ def _cache_get(lat: float, lng: float, situation: str) -> Optional[list]:
         return None
     return scored
 
+
 # --------- Situation config ---------
-# Each situation maps to Google Places query params + a vibe hint for Claude
 SITUATIONS = {
     "focus": {
         "label": "Need to focus",
@@ -259,25 +256,22 @@ async def reverse_geocode_city(lat: float, lng: float) -> Optional[str]:
 
 
 def build_photo_url(photo_reference: str) -> str:
-    # Return backend-proxied URL (hides API key, ensures CORS-friendly image)
     return f"/api/place_photo?ref={photo_reference}&maxwidth=800"
 
 
 @api_router.get("/place_photo")
 async def place_photo(ref: str, maxwidth: int = 800):
-    """Proxy for Google Place Photos — keeps API key server-side and delivers
-    images with our own CORS headers so canvas-based tools (html-to-image) work."""
     upstream = "https://maps.googleapis.com/maps/api/place/photo"
     params = {"photo_reference": ref, "maxwidth": maxwidth, "key": GOOGLE_MAPS_API_KEY}
     try:
-        client_h = httpx.AsyncClient(timeout=20.0, follow_redirects=True)
-        r = await client_h.get(upstream, params=params)
+        http_client = httpx.AsyncClient(timeout=20.0, follow_redirects=True)
+        r = await http_client.get(upstream, params=params)
         if r.status_code != 200:
-            await client_h.aclose()
+            await http_client.aclose()
             raise HTTPException(status_code=502, detail="Photo fetch failed")
         content_type = r.headers.get("content-type", "image/jpeg")
         body = r.content
-        await client_h.aclose()
+        await http_client.aclose()
     except httpx.HTTPError:
         raise HTTPException(status_code=502, detail="Photo fetch failed")
 
@@ -293,18 +287,7 @@ async def place_photo(ref: str, maxwidth: int = 800):
 
 async def generate_vibes(picks: List[dict], city: Optional[str], vibe_hint: str) -> List[str]:
     """Generate vibe descriptions for multiple places in a single LLM call."""
-    from emergentintegrations.llm.chat import LlmChat, UserMessage
-
-    chat = LlmChat(
-        api_key=EMERGENT_LLM_KEY,
-        session_id="vibe-check",
-        system_message=(
-            "You are a confident local friend giving one-line recommendations. "
-            "Your descriptions are vivid, specific, and feel spoken, not written. "
-            "Never use review-speak ('offers', 'features', 'boasts'). "
-            "Each line must be under 18 words, no emojis, no quotes."
-        ),
-    ).with_model("anthropic", "claude-sonnet-4-5-20250929")
+    from anthropic import AsyncAnthropic
 
     city_txt = f" in {city}" if city else ""
     lines = []
@@ -319,9 +302,24 @@ async def generate_vibes(picks: List[dict], city: Optional[str], vibe_hint: str)
     )
 
     try:
-        resp = await chat.send_message(UserMessage(text=prompt))
-        text = resp.strip()
-        # Strip code fences if present
+        anthropic_client = AsyncAnthropic(api_key=EMERGENT_LLM_KEY)
+        message = await anthropic_client.messages.create(
+            model="claude-sonnet-4-5-20250514",
+            max_tokens=600,
+            system=(
+                "You are a confident local friend giving one-line recommendations. "
+                "Your descriptions are vivid, specific, and feel spoken, not written. "
+                "Never use review-speak ('offers', 'features', 'boasts'). "
+                "Each line must be under 18 words, no emojis, no quotes."
+            ),
+            messages=[{"role": "user", "content": prompt}],
+        )
+        text = ""
+        for block in message.content:
+            if getattr(block, "type", None) == "text":
+                text = block.text
+                break
+        text = (text or "").strip()
         if text.startswith("```"):
             text = text.split("```", 2)[1]
             if text.startswith("json"):
@@ -333,7 +331,6 @@ async def generate_vibes(picks: List[dict], city: Optional[str], vibe_hint: str)
     except Exception as e:
         logging.warning(f"Vibe generation failed, using fallback: {e}")
 
-    # Fallback vibes
     return [f"{vibe_hint.capitalize()}. A solid call." for _ in picks]
 
 
@@ -405,7 +402,6 @@ async def place_details(req: PlaceDetailsRequest):
             reverse=True,
         )[0]
         text = (best.get("text") or "").strip()
-        # Cap review length to keep UI tidy
         if len(text) > 320:
             text = text[:317].rstrip() + "…"
         top_rev = PlaceReview(
@@ -415,7 +411,6 @@ async def place_details(req: PlaceDetailsRequest):
             relative_time=best.get("relative_time_description"),
         )
 
-    # Walking minutes: haversine × 1.25 detour factor, 80 m/min walking pace
     walking_minutes: Optional[int] = None
     loc = (d.get("geometry") or {}).get("location")
     if loc and req.origin_lat is not None and req.origin_lng is not None:
@@ -438,7 +433,6 @@ async def place_details(req: PlaceDetailsRequest):
 
 
 def _score_results(results: list, origin_lat: float, origin_lng: float, cfg: dict) -> list:
-    """Apply filters (rating, distance) and compute score. Returns sorted [(score, dist, place), ...]."""
     scored = []
     for p in results:
         rating = p.get("rating")
@@ -452,7 +446,6 @@ def _score_results(results: list, origin_lat: float, origin_lng: float, cfg: dic
             continue
         score = rating * (1.0 / max(dist + 50, 50))
         scored.append((score, dist, p))
-    # Also add relaxed tail (below min_rating but still within radius) so reroll can dig deeper
     seen_ids = {p[2].get("place_id") for p in scored}
     relaxed: list = []
     for p in results:
@@ -521,12 +514,10 @@ async def recommend(req: RecommendRequest, request: Request):
             detail="No vibe-worthy spots within 1.5km. Try a different situation or move around.",
         )
 
-    # Resolve city (for vibe hint) — best-effort
     city = req.city
     if not city:
         city = await reverse_geocode_city(req.lat, req.lng)
 
-    # Build simple dicts for LLM
     simple = [
         {"name": p.get("name"), "rating": p.get("rating"), "type_label": cfg["label"].lower()}
         for _, _, p in top
@@ -561,7 +552,6 @@ async def reroll(req: RerollRequest, request: Request):
 
     scored = await _get_or_fetch_scored(req.lat, req.lng, req.situation, cfg)
     exclude = set(req.exclude or [])
-    # find the best remaining pick not in exclude
     next_item = None
     for item in scored:
         pid = item[2].get("place_id")
@@ -610,4 +600,4 @@ logger = logging.getLogger(__name__)
 
 @app.on_event("shutdown")
 async def shutdown_db_client():
-    client.close()
+    mongo_client.close()
